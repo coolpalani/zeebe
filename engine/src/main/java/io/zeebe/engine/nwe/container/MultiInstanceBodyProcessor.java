@@ -140,15 +140,86 @@ public final class MultiInstanceBodyProcessor
 
   @Override
   public void onTerminating(
-      final ExecutableMultiInstanceBody element, final BpmnElementContext context) {}
+      final ExecutableMultiInstanceBody element, final BpmnElementContext context) {
+
+    eventSubscriptionBehavior.unsubscribeFromEvents(context);
+
+    stateTransitionBehavior.terminateChildInstances(context);
+  }
 
   @Override
   public void onTerminated(
-      final ExecutableMultiInstanceBody element, final BpmnElementContext context) {}
+      final ExecutableMultiInstanceBody element, final BpmnElementContext context) {
+
+    eventSubscriptionBehavior.publishTriggeredBoundaryEvent(context);
+
+    incidentBehavior.resolveIncidents(context);
+
+    stateTransitionBehavior.onElementTerminated(element, context);
+
+    stateBehavior.consumeToken(context);
+  }
 
   @Override
   public void onEventOccurred(
-      final ExecutableMultiInstanceBody element, final BpmnElementContext context) {}
+      final ExecutableMultiInstanceBody element, final BpmnElementContext context) {
+
+    eventSubscriptionBehavior.triggerBoundaryEvent(element, context);
+  }
+
+  @Override
+  public void onChildCompleted(
+      final ExecutableMultiInstanceBody element,
+      final BpmnElementContext flowScopeContext,
+      final BpmnElementContext childContext) {
+    final var loopCharacteristics = element.getLoopCharacteristics();
+
+    if (loopCharacteristics.isSequential()) {
+
+      final var inputCollectionVariable = readInputCollectionVariable(element, childContext);
+      if (inputCollectionVariable.isEmpty()) {
+        return;
+      }
+
+      final var array = inputCollectionVariable.get();
+      final var loopCounter =
+          stateBehavior.getFlowScopeInstance(childContext).getMultiInstanceLoopCounter();
+      if (loopCounter < array.size()) {
+
+        final var item = array.get(loopCounter);
+        createInnerInstance(element, flowScopeContext, item);
+      }
+    }
+
+    final Optional<Boolean> updatedSuccessfully =
+        loopCharacteristics
+            .getOutputCollection()
+            .map(variableName -> updateOutputCollection(element, childContext, variableName));
+
+    if (updatedSuccessfully.isPresent() && !updatedSuccessfully.get()) {
+      // An incident was raised while updating the output collection, stop handling activity
+      return;
+    }
+
+    if (stateBehavior.isLastActiveExecutionPathInScope(childContext)) {
+      stateTransitionBehavior.transitionToCompleting(flowScopeContext);
+    }
+  }
+
+  @Override
+  public void onChildTerminated(
+      final ExecutableMultiInstanceBody element,
+      final BpmnElementContext flowScopeContext,
+      final BpmnElementContext childContext) {
+
+    if (flowScopeContext.getIntent() == WorkflowInstanceIntent.ELEMENT_TERMINATING
+        && stateBehavior.isLastActiveExecutionPathInScope(childContext)) {
+      stateTransitionBehavior.transitionToTerminated(flowScopeContext);
+
+    } else {
+      eventSubscriptionBehavior.publishTriggeredEventSubProcess(flowScopeContext);
+    }
+  }
 
   private Optional<List<DirectBuffer>> readInputCollectionVariable(
       final ExecutableMultiInstanceBody element, final BpmnElementContext context) {
@@ -226,60 +297,6 @@ public final class MultiInstanceBodyProcessor
     final var length = variableWriter.getOffset();
 
     stateBehavior.setLocalVariable(context, variableName, variableBuffer, 0, length);
-  }
-
-  @Override
-  public void onChildCompleted(
-      final ExecutableMultiInstanceBody element,
-      final BpmnElementContext flowScopeContext,
-      final BpmnElementContext childContext) {
-    final var loopCharacteristics = element.getLoopCharacteristics();
-
-    if (loopCharacteristics.isSequential()) {
-
-      final var inputCollectionVariable = readInputCollectionVariable(element, childContext);
-      if (inputCollectionVariable.isEmpty()) {
-        return;
-      }
-
-      final var array = inputCollectionVariable.get();
-      final var loopCounter =
-          stateBehavior.getFlowScopeInstance(childContext).getMultiInstanceLoopCounter();
-      if (loopCounter < array.size()) {
-
-        final var item = array.get(loopCounter);
-        createInnerInstance(element, flowScopeContext, item);
-      }
-    }
-
-    final Optional<Boolean> updatedSuccessfully =
-        loopCharacteristics
-            .getOutputCollection()
-            .map(variableName -> updateOutputCollection(element, childContext, variableName));
-
-    if (updatedSuccessfully.isPresent() && !updatedSuccessfully.get()) {
-      // An incident was raised while updating the output collection, stop handling activity
-      return;
-    }
-
-    if (stateBehavior.isLastActiveExecutionPathInScope(childContext)) {
-      stateTransitionBehavior.transitionToCompleting(flowScopeContext);
-    }
-  }
-
-  @Override
-  public void onChildTerminated(
-      final ExecutableMultiInstanceBody element,
-      final BpmnElementContext flowScopeContext,
-      final BpmnElementContext childContext) {
-
-    if (flowScopeContext.getIntent() == WorkflowInstanceIntent.ELEMENT_TERMINATING
-        && stateBehavior.isLastActiveExecutionPathInScope(childContext)) {
-      stateTransitionBehavior.transitionToTerminated(flowScopeContext);
-
-    } else {
-      eventSubscriptionBehavior.publishTriggeredEventSubProcess(flowScopeContext);
-    }
   }
 
   private boolean updateOutputCollection(
