@@ -58,7 +58,7 @@ public final class StartEventTransformer implements ModelElementTransformer<Star
 
   private void bindLifecycle(final ExecutableCatchEventElement startEvent) {
     startEvent.bindLifecycleState(
-        WorkflowInstanceIntent.EVENT_OCCURRED, BpmnStep.START_EVENT_EVENT_OCCURRED);
+        WorkflowInstanceIntent.EVENT_OCCURRED, BpmnStep.BPMN_ELEMENT_PROCESSOR);
   }
 
   /**
