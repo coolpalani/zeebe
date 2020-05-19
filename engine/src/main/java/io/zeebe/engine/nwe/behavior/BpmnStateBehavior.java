@@ -100,7 +100,7 @@ public final class BpmnStateBehavior {
     return elementInstanceState.getInstance(context.getFlowScopeKey());
   }
 
-  public void removeInstance(final BpmnElementContext context) {
+  public void removeElementInstance(final BpmnElementContext context) {
     eventScopeInstanceState.deleteInstance(context.getElementInstanceKey());
     elementInstanceState.removeInstance(context.getElementInstanceKey());
   }
