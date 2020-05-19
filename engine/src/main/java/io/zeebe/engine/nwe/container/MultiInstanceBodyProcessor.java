@@ -15,6 +15,7 @@ import io.zeebe.engine.nwe.behavior.BpmnEventSubscriptionBehavior;
 import io.zeebe.engine.nwe.behavior.BpmnIncidentBehavior;
 import io.zeebe.engine.nwe.behavior.BpmnStateBehavior;
 import io.zeebe.engine.nwe.behavior.BpmnStateTransitionBehavior;
+import io.zeebe.engine.processor.Failure;
 import io.zeebe.engine.processor.workflow.ExpressionProcessor;
 import io.zeebe.engine.processor.workflow.deployment.model.element.ExecutableMultiInstanceBody;
 import io.zeebe.engine.state.instance.VariablesState;
@@ -22,9 +23,9 @@ import io.zeebe.msgpack.spec.MsgPackHelper;
 import io.zeebe.msgpack.spec.MsgPackReader;
 import io.zeebe.msgpack.spec.MsgPackWriter;
 import io.zeebe.protocol.record.intent.WorkflowInstanceIntent;
+import io.zeebe.util.Either;
 import io.zeebe.util.buffer.BufferUtil;
 import java.util.List;
-import java.util.Optional;
 import org.agrona.DirectBuffer;
 import org.agrona.ExpandableArrayBuffer;
 import org.agrona.MutableDirectBuffer;
@@ -71,13 +72,8 @@ public final class MultiInstanceBodyProcessor
       final ExecutableMultiInstanceBody element, final BpmnElementContext context) {
 
     // verify that the input collection variable is present and valid
-    final Optional<List<DirectBuffer>> results = readInputCollectionVariable(element, context);
-    if (results.isEmpty()) {
-      return;
-    }
-
-    eventSubscriptionBehavior
-        .subscribeToEvents(element, context)
+    readInputCollectionVariable(element, context)
+        .flatMap(ok -> eventSubscriptionBehavior.subscribeToEvents(element, context))
         .ifRightOrLeft(
             ok -> stateTransitionBehavior.transitionToActivated(context),
             failure -> incidentBehavior.createIncident(failure, context));
@@ -87,30 +83,33 @@ public final class MultiInstanceBodyProcessor
   public void onActivated(
       final ExecutableMultiInstanceBody element, final BpmnElementContext context) {
 
-    final var loopCharacteristics = element.getLoopCharacteristics();
-    final Optional<List<DirectBuffer>> inputCollection =
-        readInputCollectionVariable(element, context);
-    if (inputCollection.isEmpty()) {
+    final var inputCollectionOrFailure = readInputCollectionVariable(element, context);
+    if (inputCollectionOrFailure.isLeft()) {
+      incidentBehavior.createIncident(inputCollectionOrFailure.getLeft(), context);
       return;
     }
 
-    final var array = inputCollection.get();
+    final var inputCollection = inputCollectionOrFailure.get();
+
+    final var loopCharacteristics = element.getLoopCharacteristics();
     loopCharacteristics
         .getOutputCollection()
-        .ifPresent(variableName -> initializeOutputCollection(context, variableName, array.size()));
+        .ifPresent(
+            variableName ->
+                initializeOutputCollection(context, variableName, inputCollection.size()));
 
-    if (array.isEmpty()) {
+    if (inputCollection.isEmpty()) {
       // complete the multi-instance body immediately
       stateTransitionBehavior.transitionToCompleting(context);
       return;
     }
 
     if (loopCharacteristics.isSequential()) {
-      final var firstItem = array.get(0);
+      final var firstItem = inputCollection.get(0);
       createInnerInstance(element, context, firstItem);
 
     } else {
-      array.forEach(item -> createInnerInstance(element, context, item));
+      inputCollection.forEach(item -> createInnerInstance(element, context, item));
     }
   }
 
@@ -172,33 +171,31 @@ public final class MultiInstanceBodyProcessor
       final ExecutableMultiInstanceBody element,
       final BpmnElementContext flowScopeContext,
       final BpmnElementContext childContext) {
-    final var loopCharacteristics = element.getLoopCharacteristics();
 
+    final var updatedOrFailure = updateOutputCollection(element, childContext);
+    if (updatedOrFailure.isLeft()) {
+      incidentBehavior.createIncident(updatedOrFailure.getLeft(), childContext);
+      return;
+    }
+
+    final var loopCharacteristics = element.getLoopCharacteristics();
     if (loopCharacteristics.isSequential()) {
 
-      final var inputCollectionVariable = readInputCollectionVariable(element, childContext);
-      if (inputCollectionVariable.isEmpty()) {
+      final var inputCollectionOrFailure = readInputCollectionVariable(element, childContext);
+      if (inputCollectionOrFailure.isLeft()) {
+        incidentBehavior.createIncident(inputCollectionOrFailure.getLeft(), childContext);
         return;
       }
 
-      final var array = inputCollectionVariable.get();
+      final var inputCollection = inputCollectionOrFailure.get();
+
       final var loopCounter =
           stateBehavior.getFlowScopeInstance(childContext).getMultiInstanceLoopCounter();
-      if (loopCounter < array.size()) {
+      if (loopCounter < inputCollection.size()) {
 
-        final var item = array.get(loopCounter);
+        final var item = inputCollection.get(loopCounter);
         createInnerInstance(element, flowScopeContext, item);
       }
-    }
-
-    final Optional<Boolean> updatedSuccessfully =
-        loopCharacteristics
-            .getOutputCollection()
-            .map(variableName -> updateOutputCollection(element, childContext, variableName));
-
-    if (updatedSuccessfully.isPresent() && !updatedSuccessfully.get()) {
-      // An incident was raised while updating the output collection, stop handling activity
-      return;
     }
 
     if (stateBehavior.isLastActiveExecutionPathInScope(childContext)) {
@@ -221,10 +218,11 @@ public final class MultiInstanceBodyProcessor
     }
   }
 
-  private Optional<List<DirectBuffer>> readInputCollectionVariable(
+  private Either<Failure, List<DirectBuffer>> readInputCollectionVariable(
       final ExecutableMultiInstanceBody element, final BpmnElementContext context) {
     final Expression inputCollection = element.getLoopCharacteristics().getInputCollection();
-    return expressionBehavior.evaluateArrayExpression(inputCollection, context.toStepContext());
+    return expressionBehavior.evaluateArrayExpression(
+        inputCollection, context.getElementInstanceKey());
   }
 
   private void createInnerInstance(
@@ -299,7 +297,17 @@ public final class MultiInstanceBodyProcessor
     stateBehavior.setLocalVariable(context, variableName, variableBuffer, 0, length);
   }
 
-  private boolean updateOutputCollection(
+  private Either<Failure, Void> updateOutputCollection(
+      final ExecutableMultiInstanceBody element, final BpmnElementContext childContext) {
+
+    return element
+        .getLoopCharacteristics()
+        .getOutputCollection()
+        .map(variableName -> updateOutputCollection(element, childContext, variableName))
+        .orElse(Either.right(null));
+  }
+
+  private Either<Failure, Void> updateOutputCollection(
       final ExecutableMultiInstanceBody element,
       final BpmnElementContext childContext,
       final DirectBuffer variableName) {
@@ -308,26 +316,28 @@ public final class MultiInstanceBodyProcessor
     final var loopCounter =
         stateBehavior.getElementInstance(childContext).getMultiInstanceLoopCounter();
 
-    final Optional<DirectBuffer> elementVariable = readOutputElementVariable(element, childContext);
-    if (elementVariable.isEmpty()) {
-      return false;
-    }
+    return readOutputElementVariable(element, childContext)
+        .map(
+            elementVariable -> {
+              // we need to read the output element variable before the current collection
+              // is read, because readOutputElementVariable(Context) uses the same
+              // buffer as getVariableLocal this could also be avoided by cloning the current
+              // collection, but that is slower.
+              final var currentCollection =
+                  variablesState.getVariableLocal(bodyInstanceKey, variableName);
+              final var updatedCollection =
+                  insertAt(currentCollection, loopCounter, elementVariable);
+              variablesState.setVariableLocal(
+                  bodyInstanceKey, childContext.getWorkflowKey(), variableName, updatedCollection);
 
-    // we need to read the output element variable before the current collection is read,
-    // because readOutputElementVariable(Context) uses the same buffer as getVariableLocal
-    // this could also be avoided by cloning the current collection, but that is slower.
-    final var currentCollection = variablesState.getVariableLocal(bodyInstanceKey, variableName);
-    final var updatedCollection = insertAt(currentCollection, loopCounter, elementVariable.get());
-    variablesState.setVariableLocal(
-        bodyInstanceKey, childContext.getWorkflowKey(), variableName, updatedCollection);
-
-    return true;
+              return null;
+            });
   }
 
-  private Optional<DirectBuffer> readOutputElementVariable(
+  private Either<Failure, DirectBuffer> readOutputElementVariable(
       final ExecutableMultiInstanceBody element, final BpmnElementContext context) {
     final var expression = element.getLoopCharacteristics().getOutputElement().orElseThrow();
-    return expressionBehavior.evaluateAnyExpression(expression, context.toStepContext());
+    return expressionBehavior.evaluateAnyExpression(expression, context.getElementInstanceKey());
   }
 
   private DirectBuffer insertAt(
