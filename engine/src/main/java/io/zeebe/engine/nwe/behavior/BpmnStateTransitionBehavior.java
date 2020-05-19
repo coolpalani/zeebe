@@ -178,7 +178,7 @@ public final class BpmnStateTransitionBehavior {
       transitionToTerminated(context);
 
     } else {
-      // wait for child instances to be terminated
+      // don't yet transition to terminated but wait for child instances to be terminated
 
       // clean up the state because some events of child instances will not be processed (e.g.
       // element completed, sequence flow taken)
