@@ -149,7 +149,9 @@ public class ElasticsearchContainer extends GenericContainer<ElasticsearchContai
 
   private void setupUser() {
     final var request = new Request("POST", "/_xpack/security/user/" + username);
-    final var body = Map.of("roles", Collections.singleton("zeebe-exporter"), "password", password);
+    final var body =
+        Map.of(
+            "roles", Collections.singleton("zeebe-exporter"), "password", password.toCharArray());
 
     try {
       request.setJsonEntity(MAPPER.writeValueAsString(body));

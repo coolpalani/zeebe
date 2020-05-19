@@ -197,8 +197,8 @@ public class ElasticsearchClient {
       final var statusLine = response.getStatusLine();
       final var status = statusLine.getStatusCode();
       if (status >= 400) {
-        log.warn("Failed to put index template {}", statusLine.getReasonPhrase());
-        return false;
+        throw new ElasticsearchExporterException(
+            "Failed to put index template: " + statusLine.getReasonPhrase());
       }
 
       return true;
