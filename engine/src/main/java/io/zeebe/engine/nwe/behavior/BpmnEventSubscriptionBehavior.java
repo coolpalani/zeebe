@@ -143,7 +143,6 @@ public final class BpmnEventSubscriptionBehavior {
   private void createWorkflowInstance(
       final DeployedWorkflow workflow, final long workflowInstanceKey) {
 
-    // todo(@korthout): check if we can just use this.record here
     recordForWFICreation
         .setBpmnProcessId(workflow.getBpmnProcessId())
         .setWorkflowKey(workflow.getKey())
